@@ -148,7 +148,7 @@ const ReflectionScreen: React.FC<Props> = ({ book, onEnd }) => {
       The student is reading "${book.title}" Chapters 6-10.
       
       STRICT INTERACTION RULES:
-      1. Be Conversational in manner, respond in a way that is conversational.
+      1. Be Conversational in manner, respond in a way that is conversational. But make sure to ask a question don't just make a comment that is not clearly asking a question.
       2. Keep responses under 15 words.
       3. Do not prompt for input while you are speaking.
       4. Stay grounded in Chapters 6-10 events (Lockhart, Mandrakes, Mrs. Norris).`;
