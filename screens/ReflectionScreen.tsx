@@ -8,6 +8,8 @@ interface Props {
   onEnd: () => void;
 }
 
+type InteractionState = 'IDLE' | 'LISTENING' | 'SPEAKING';
+
 // Audio Helpers
 function decode(base64: string) {
   const binaryString = atob(base64);
@@ -48,8 +50,8 @@ async function decodeAudioData(
 }
 
 const ReflectionScreen: React.FC<Props> = ({ book, onEnd }) => {
-  const [isActive, setIsActive] = useState(false);
-  const [status, setStatus] = useState<string>("Ready to start");
+  const [interactionState, setInteractionState] = useState<InteractionState>('IDLE');
+  const [statusText, setStatusText] = useState<string>("Ready to start");
   const [transcription, setTranscription] = useState("");
   const [aiTranscription, setAiTranscription] = useState("");
   const [timeLeft, setTimeLeft] = useState(30);
@@ -61,8 +63,26 @@ const ReflectionScreen: React.FC<Props> = ({ book, onEnd }) => {
   const streamRef = useRef<MediaStream | null>(null);
   const nextStartTimeRef = useRef(0);
   const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
-  // Fix: Use any or a browser-safe type instead of NodeJS.Timeout to avoid namespace errors in some environments
   const timerRef = useRef<any>(null);
+  
+  // Refs for turn-taking state management (avoiding stale closures in onaudioprocess)
+  const stateRef = useRef<InteractionState>('IDLE');
+  const playingChunksRef = useRef(0);
+  const isTurnCompleteRef = useRef(false);
+
+  const updateState = (newState: InteractionState) => {
+    stateRef.current = newState;
+    setInteractionState(newState);
+  };
+
+  const checkTurnEnd = () => {
+    // Transition back to listening ONLY when model has finished sending and audio has finished playing
+    if (isTurnCompleteRef.current && playingChunksRef.current === 0) {
+      updateState('LISTENING');
+      setStatusText("Listening...");
+      isTurnCompleteRef.current = false;
+    }
+  };
 
   const stopSession = () => {
     if (sessionRef.current) {
@@ -87,14 +107,13 @@ const ReflectionScreen: React.FC<Props> = ({ book, onEnd }) => {
     sourcesRef.current.clear();
     if (timerRef.current) clearInterval(timerRef.current);
     
-    setIsActive(false);
+    updateState('IDLE');
     setTimerActive(false);
-    setStatus("Session Ended");
+    setStatusText("Session Ended");
   };
 
-  // Start timer when user starts talking
   useEffect(() => {
-    if (isActive && transcription.length > 0 && !timerActive) {
+    if (interactionState === 'LISTENING' && transcription.length > 0 && !timerActive) {
       setTimerActive(true);
       timerRef.current = setInterval(() => {
         setTimeLeft((prev) => {
@@ -106,12 +125,12 @@ const ReflectionScreen: React.FC<Props> = ({ book, onEnd }) => {
         });
       }, 1000);
     }
-  }, [isActive, transcription, timerActive]);
+  }, [interactionState, transcription, timerActive]);
 
   const startSession = async () => {
     try {
-      setStatus("Connecting...");
-      setIsActive(true);
+      setStatusText("Connecting...");
+      updateState('IDLE');
       setTimeLeft(30);
       setTimerActive(false);
 
@@ -125,25 +144,28 @@ const ReflectionScreen: React.FC<Props> = ({ book, onEnd }) => {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
 
-      const systemInstruction = `You are Lumen, a friendly AI reading companion. Make sure you finish asking your question before stopping because you heard background noise or anything else, don't get distracted.
+      const systemInstruction = `You are Lumen, a friendly AI reading companion. 
       The student is reading "${book.title}" Chapters 6-10.
       
-      CRITICAL RULES:
-      1. START IMMEDIATELY by asking this exact question: "How does Gilderoy Lockhart’s behavior in his lesson differ from what we were led to expect earlier?"
-      2. BE BRIEF. Keep every response under 15 words. 
-      3. Focus on Chapters 6-10 (Lockhart, Mandrakes, the mysterious voice Harry hears, and the discovery of Mrs. Norris).
-      4. Only ask ONE question at a time.
-      5. Stay encouraging and warm and don't be on topic, be specific, grounded to the events in the chapters 6-10 of harry potter and chamber of secrets, don't add fluff.`;
+      STRICT INTERACTION RULES:
+      1. Be Conversational in manner, respond in a way that is conversational.
+      2. Keep responses under 15 words.
+      3. Do not prompt for input while you are speaking.
+      4. Stay grounded in Chapters 6-10 events (Lockhart, Mandrakes, Mrs. Norris).`;
 
       const sessionPromise = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-12-2025',
         callbacks: {
           onopen: () => {
-            setStatus("Listening...");
+            updateState('LISTENING');
+            setStatusText("Listening...");
             const source = inputAudioContext.createMediaStreamSource(stream);
             const scriptProcessor = inputAudioContext.createScriptProcessor(4096, 1, 1);
             
             scriptProcessor.onaudioprocess = (e) => {
+              // STRICT TURN TAKING: Only send audio if we are in LISTENING state
+              if (stateRef.current !== 'LISTENING') return;
+
               const inputData = e.inputBuffer.getChannelData(0);
               const l = inputData.length;
               const int16 = new Int16Array(l);
@@ -163,38 +185,46 @@ const ReflectionScreen: React.FC<Props> = ({ book, onEnd }) => {
             scriptProcessor.connect(inputAudioContext.destination);
           },
           onmessage: async (message: LiveServerMessage) => {
+            // Track transcriptions
             if (message.serverContent?.outputTranscription) {
               setAiTranscription(prev => prev + message.serverContent!.outputTranscription!.text);
             } else if (message.serverContent?.inputTranscription) {
               setTranscription(prev => prev + message.serverContent!.inputTranscription!.text);
             }
 
+            // Handle turn completion flag from model
             if (message.serverContent?.turnComplete) {
+              isTurnCompleteRef.current = true;
               setTranscription("");
               setAiTranscription("");
+              checkTurnEnd();
             }
 
+            // Handle audio chunks
             const base64Audio = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
             if (base64Audio) {
-              setStatus("Lumen Speaking...");
+              // Switch to SPEAKING state if we weren't already
+              if (stateRef.current !== 'SPEAKING') {
+                updateState('SPEAKING');
+                setStatusText("Lumen Speaking...");
+              }
+
+              playingChunksRef.current++;
               nextStartTimeRef.current = Math.max(nextStartTimeRef.current, outputAudioContext.currentTime);
               const audioBuffer = await decodeAudioData(decode(base64Audio), outputAudioContext, 24000, 1);
               const source = outputAudioContext.createBufferSource();
               source.buffer = audioBuffer;
               source.connect(outputAudioContext.destination);
+              
               source.onended = () => {
                 sourcesRef.current.delete(source);
-                if (sourcesRef.current.size === 0) setStatus("Listening...");
+                playingChunksRef.current--;
+                checkTurnEnd();
               };
+
               source.start(nextStartTimeRef.current);
               nextStartTimeRef.current += audioBuffer.duration;
               sourcesRef.current.add(source);
-            }
-
-            if (message.serverContent?.interrupted) {
-              for (const s of sourcesRef.current) s.stop();
-              sourcesRef.current.clear();
-              nextStartTimeRef.current = 0;
             }
           },
           onclose: () => stopSession(),
@@ -217,13 +247,13 @@ const ReflectionScreen: React.FC<Props> = ({ book, onEnd }) => {
       sessionRef.current = await sessionPromise;
     } catch (err) {
       console.error(err);
-      setStatus("Error connecting");
-      setIsActive(false);
+      setStatusText("Error connecting");
+      updateState('IDLE');
     }
   };
 
   const toggleSession = () => {
-    if (isActive) stopSession();
+    if (interactionState !== 'IDLE') stopSession();
     else startSession();
   };
 
@@ -276,9 +306,9 @@ const ReflectionScreen: React.FC<Props> = ({ book, onEnd }) => {
 
         {/* Conversation Display */}
         <div className="flex-1 flex flex-col items-center justify-center w-full my-6">
-          <div className="relative w-full bg-white rounded-[2.5rem] p-8 shadow-soft border border-gray-100 transform transition-all min-h-[220px] flex flex-col justify-center">
-            <div className="absolute -top-4 -left-2 bg-primary text-white rounded-xl p-2 shadow-lg">
-              <span className="material-symbols-outlined text-2xl">chat</span>
+          <div className={`relative w-full bg-white rounded-[2.5rem] p-8 shadow-soft border border-gray-100 transform transition-all min-h-[220px] flex flex-col justify-center ${interactionState === 'SPEAKING' ? 'ring-2 ring-primary/20' : ''}`}>
+            <div className={`absolute -top-4 -left-2 rounded-xl p-2 shadow-lg transition-colors ${interactionState === 'SPEAKING' ? 'bg-primary text-white' : 'bg-gray-200 text-text-secondary'}`}>
+              <span className="material-symbols-outlined text-2xl">{interactionState === 'SPEAKING' ? 'volume_up' : 'chat'}</span>
             </div>
             
             <div className="space-y-4">
@@ -290,11 +320,15 @@ const ReflectionScreen: React.FC<Props> = ({ book, onEnd }) => {
               ) : (
                 <div className="text-center">
                    <p className="text-text-secondary text-base font-medium leading-relaxed italic">
-                    {isActive ? "Lumen is ready to hear your thoughts..." : "Tap the microphone to start. Lumen has a question ready for you!"}
+                    {interactionState === 'IDLE' 
+                      ? "Tap the microphone to start. Lumen has a question ready for you!"
+                      : interactionState === 'SPEAKING' 
+                        ? "Lumen is speaking..." 
+                        : "Lumen is listening! According to the legend, who can control the monster in the Chamber of Secrets?"}
                   </p>
-                  {status === "Listening..." && !aiTranscription && (
+                  {interactionState === 'LISTENING' && !transcription && (
                     <p className="text-primary text-sm font-bold mt-4 animate-pulse">
-                      "What did you think of Lockhart's first lesson?"
+                      Go ahead, I'm listening!
                     </p>
                   )}
                 </div>
@@ -312,7 +346,7 @@ const ReflectionScreen: React.FC<Props> = ({ book, onEnd }) => {
 
         {/* Interaction Zone */}
         <div className="w-full flex flex-col items-center justify-end gap-6 mb-4">
-          <div className={`flex items-center justify-center h-16 w-full gap-2 transition-all duration-500 ${isActive ? 'opacity-100 scale-100' : 'opacity-0 scale-95 pointer-events-none'}`}>
+          <div className={`flex items-center justify-center h-16 w-full gap-2 transition-all duration-500 ${interactionState === 'LISTENING' ? 'opacity-100 scale-100' : 'opacity-0 scale-95 pointer-events-none'}`}>
             <div className="w-1.5 bg-primary/40 rounded-full wave-bar h-4" style={{ animationDelay: '0.1s' }}></div>
             <div className="w-1.5 bg-primary/60 rounded-full wave-bar h-8" style={{ animationDelay: '0.3s' }}></div>
             <div className="w-1.5 bg-primary rounded-full wave-bar h-12" style={{ animationDelay: '0.5s' }}></div>
@@ -322,25 +356,34 @@ const ReflectionScreen: React.FC<Props> = ({ book, onEnd }) => {
           </div>
 
           <div className="relative group">
-            {isActive && <div className="absolute inset-0 rounded-full bg-primary/20 pulse-ring scale-110"></div>}
+            {interactionState === 'LISTENING' && <div className="absolute inset-0 rounded-full bg-primary/20 pulse-ring scale-110"></div>}
             <button 
               onClick={toggleSession}
+              disabled={interactionState === 'SPEAKING'}
               className={`relative z-10 flex items-center justify-center size-24 rounded-full transition-all active:scale-90 shadow-2xl ${
-                isActive ? 'bg-red-500 shadow-red-500/40' : 'bg-primary shadow-primary/40'
+                interactionState === 'LISTENING' 
+                  ? 'bg-red-500 shadow-red-500/40' 
+                  : interactionState === 'SPEAKING'
+                    ? 'bg-gray-300 shadow-none cursor-not-allowed'
+                    : 'bg-primary shadow-primary/40'
               }`}
             >
               <span className="material-symbols-outlined text-5xl text-white">
-                {isActive ? 'stop' : 'mic'}
+                {interactionState === 'LISTENING' ? 'stop' : interactionState === 'SPEAKING' ? 'mic_off' : 'mic'}
               </span>
             </button>
           </div>
           
           <div className="flex flex-col items-center gap-1">
             <p className="text-text-primary text-sm font-bold uppercase tracking-widest">
-              {timeLeft === 0 ? "Time's up!" : status}
+              {timeLeft === 0 ? "Time's up!" : statusText}
             </p>
-            <p className="text-text-secondary text-xs font-medium">
-              {isActive ? (timeLeft === 0 ? 'Wrap up your thoughts' : 'Tap to end early') : 'Tap to speak with Lumen'}
+            <p className="text-text-secondary text-xs font-medium text-center max-w-[240px]">
+              {interactionState === 'LISTENING' 
+                ? (timeLeft === 0 ? 'Wrap up your thoughts' : 'Tap to end early') 
+                : interactionState === 'SPEAKING' 
+                  ? 'Microphone disabled while AI speaks' 
+                  : 'Tap to start your reflection'}
             </p>
           </div>
 
@@ -349,7 +392,9 @@ const ReflectionScreen: React.FC<Props> = ({ book, onEnd }) => {
               <span className="material-symbols-outlined">keyboard</span>
             </button>
             <div className="flex-1 text-center">
-               <span className="text-[10px] font-black text-primary uppercase tracking-[0.3em]">{isActive ? 'LIVE REFLECTION' : 'STANDBY'}</span>
+               <span className="text-[10px] font-black text-primary uppercase tracking-[0.3em]">
+                {interactionState === 'IDLE' ? 'STANDBY' : 'STRICT TURN-TAKING'}
+               </span>
             </div>
             <button className="flex items-center justify-center size-12 rounded-2xl bg-white shadow-sm border border-gray-100 text-text-secondary hover:bg-black/5">
               <span className="material-symbols-outlined">settings_voice</span>
