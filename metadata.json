@@ -1,0 +1,7 @@
+{
+  "name": "LUMENAI",
+  "description": "AI Learning Companion",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
