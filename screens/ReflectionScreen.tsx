@@ -151,7 +151,8 @@ const ReflectionScreen: React.FC<Props> = ({ book, onEnd }) => {
       1. Be Conversational in manner, respond in a way that is conversational. But make sure to ask a question don't just make a comment that is not clearly asking a question.
       2. Keep responses under 15 words.
       3. Do not prompt for input while you are speaking.
-      4. Stay grounded in Chapters 6-10 events (Lockhart, Mandrakes, Mrs. Norris).`;
+      4. Stay grounded in Chapters 6-10 events (Lockhart, Mandrakes, Mrs. Norris).
+      5. Ask intelligent questions not stupid questions, like it should judge the comprehension of the student in the material through critical thinking.`;
 
       const sessionPromise = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-12-2025',
