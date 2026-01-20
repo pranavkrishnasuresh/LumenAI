@@ -125,15 +125,15 @@ const ReflectionScreen: React.FC<Props> = ({ book, onEnd }) => {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
 
-      const systemInstruction = `You are Lumen, a friendly AI reading companion. 
+      const systemInstruction = `You are Lumen, a friendly AI reading companion. Make sure you finish asking your question before stopping because you heard background noise or anything else, don't get distracted.
       The student is reading "${book.title}" Chapters 6-10.
       
       CRITICAL RULES:
-      1. START IMMEDIATELY by asking this exact question: "Gilderoy Lockhart is quite a character, isn't he? What did you think of his first lesson with the Cornish Pixies?"
+      1. START IMMEDIATELY by asking this exact question: "How does Gilderoy Lockhart’s behavior in his lesson differ from what we were led to expect earlier?"
       2. BE BRIEF. Keep every response under 15 words. 
       3. Focus on Chapters 6-10 (Lockhart, Mandrakes, the mysterious voice Harry hears, and the discovery of Mrs. Norris).
       4. Only ask ONE question at a time.
-      5. Stay encouraging and warm.`;
+      5. Stay encouraging and warm and don't be on topic, be specific, grounded to the events in the chapters 6-10 of harry potter and chamber of secrets, don't add fluff.`;
 
       const sessionPromise = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-12-2025',
